@@ -1,0 +1,50 @@
+name: watch
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'send test message'
+        required: false
+        default: 'no'
+permissions:
+  contents: write
+concurrency:
+  group: watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: check heartbeat
+        env:
+          LAST_BEAT: ${{ vars.LAST_BEAT }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          TEST: ${{ github.event.inputs.test }}
+        run: |
+          set -u
+          send() { curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=$1" -o /dev/null -w '%{http_code}\n'; }
+          cy() { TZ=Asia/Nicosia date -d "@$1" '+%d.%m %H:%M'; }
+          now=$(date +%s); last=${LAST_BEAT:-0}; age=$(( (now - last) / 60 ))
+          read -r state since < state.txt || { state=ok; since=0; }
+          echo "age=${age}m state=$state"
+          if [ "${TEST:-no}" = "yes" ]; then
+            send "🧪 Пробное сообщение внешнего сторожа (GitHub). Последняя отметка Мака: $(cy $last), ${age} мин назад. Всё работает."
+            exit 0
+          fi
+          changed=0
+          if [ $age -ge 20 ] && [ "$state" = ok ]; then
+            send "🚨 Мак и агенты пропали со связи. Последняя отметка: $(cy $last) (кипрское время), ${age} мин назад. Возможные причины: нет света или интернета, сел или выключен Мак, завис. Это пишет внешний сторож — Юра сейчас ответить не может."
+            echo "down $last" > state.txt; changed=1
+          elif [ $age -lt 20 ] && [ "$state" = down ]; then
+            send "✅ Мак снова на связи (отметка $(cy $last)). Не было связи с $(cy $since)."
+            echo "ok 0" > state.txt; changed=1
+          fi
+          if [ $changed = 1 ]; then
+            git config user.name heartbeat-bot; git config user.email heartbeat-bot@users.noreply.github.com
+            git add state.txt; git commit -qm "state: $(cat state.txt)"; git pull -q --rebase; git push -q
+          fi
